@@ -1,32 +1,44 @@
 <?php
-// enviar.php - Script Seguro con Cloudflare + Honeypot
+// enviar.php - Versión SMTP Autenticado (Con PHPMailer + Cloudflare)
+// ---------------------------------------------------------
 
-// --- CONFIGURACIÓN DE SEGURIDAD ---
-// PEGA TU SECRET KEY DE CLOUDFLARE ENTRE LAS COMILLAS
-$turnstile_secret = '0x4AAAAAACXt1cIxGk_PEYx1AJfd2IeqZEU'; 
-// --------------------------------
+// 1. CARGAMOS PHPMAILER
+// (Asegurate que la carpeta 'PHPMailer' esté subida junto a este archivo)
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
+use PHPMailer\PHPMailer\SMTP;
 
-// 1. Verificar método POST
-if ($_SERVER["REQUEST_METHOD"] != "POST") {
-    // Si intentan entrar directo, los mandamos al inicio
-    header("Location: index.html");
-    exit;
-}
+require 'PHPMailer/src/Exception.php';
+require 'PHPMailer/src/PHPMailer.php';
+require 'PHPMailer/src/SMTP.php';
 
-// 2. HONEYPOT: Si el campo oculto 'website_check' tiene algo, es un BOT.
-if (!empty($_POST['website_check'])) {
-    die("Error de seguridad automático.");
-}
+// 2. CONFIGURACIÓN
+// Tu clave secreta de Cloudflare (La mantuve igual)
+define('TURNSTILE_SECRET', '0x4AAAAAACXt1cIxGk_PEYx1AJfd2IeqZEU'); 
 
-// 3. CLOUDFLARE TURNSTILE (Verificación del Captcha)
-if (isset($_POST['cf-turnstile-response'])) {
-    $token = $_POST['cf-turnstile-response'];
+// TUS DATOS DE CORREO (SMTP)
+define('SMTP_HOST', 'mail.nsberazategui.com.ar');
+define('SMTP_USER', 'Consultas@nsberazategui.com.ar');
+define('SMTP_PASS', 'Ns2k10con.sul'); // Contraseña real
+define('SMTP_PORT', 465); // Puerto Seguro SSL
+
+// ---------------------------------------------------------
+
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+
+    // A. SEGURIDAD: HONEYPOT (Trampa anti-robots)
+    if (!empty($_POST['website_check'])) {
+        die("Error de seguridad (Honeypot detectado).");
+    }
+
+    // B. SEGURIDAD: CLOUDFLARE TURNSTILE
+    $token = $_POST['cf-turnstile-response'] ?? '';
     $ip = $_SERVER['REMOTE_ADDR'];
 
-    // Preguntarle a Cloudflare si el token es válido
+    // Consultamos a Cloudflare
     $url = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
     $data = [
-        'secret' => $turnstile_secret,
+        'secret' => TURNSTILE_SECRET,
         'response' => $token,
         'remoteip' => $ip
     ];
@@ -38,62 +50,77 @@ if (isset($_POST['cf-turnstile-response'])) {
             'content' => http_build_query($data)
         ]
     ];
-    
     $context  = stream_context_create($options);
     $result = file_get_contents($url, false, $context);
     $response = json_decode($result);
 
-    // Si Cloudflare dice que no es humano:
-    if ($response->success != true) {
-        echo "<script>alert('Error de seguridad: No se pudo verificar que eres humano. Por favor intenta de nuevo.'); window.location.href='contacto.html';</script>";
+    // Si Cloudflare dice que no es humano
+    if ($response->success == false) {
+        echo "<script>alert('Error de seguridad: Por favor completá el Captcha nuevamente.'); window.history.back();</script>";
         exit;
     }
 
+    // C. RECIBIR DATOS (Respetando tus mayúsculas originales)
+    $nombre   = strip_tags(trim($_POST['Nombre'] ?? 'Sin Nombre'));
+    $email    = filter_var(trim($_POST['Email'] ?? ''), FILTER_SANITIZE_EMAIL);
+    $telefono = strip_tags(trim($_POST['Telefono'] ?? 'Sin teléfono'));
+    $mensaje  = strip_tags(trim($_POST['Mensaje'] ?? ''));
+
+    // D. ENVIAR CON PHPMAILER
+    $mail = new PHPMailer(true);
+
+    try {
+        // Configuración del Servidor
+        // $mail->SMTPDebug = SMTP::DEBUG_SERVER; // Descomentar solo si hay errores graves
+        $mail->isSMTP();
+        $mail->Host       = SMTP_HOST;
+        $mail->SMTPAuth   = true;
+        $mail->Username   = SMTP_USER;
+        $mail->Password   = SMTP_PASS;
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS; // Encriptación SSL forzada
+        $mail->Port       = SMTP_PORT;
+        $mail->CharSet    = 'UTF-8';
+
+        // Remitente y Destinatario
+        // OJO: El "From" TIENE que ser tu casilla real para evitar Spam
+        $mail->setFrom(SMTP_USER, 'Web Sanatorio Berazategui'); 
+        
+        // A donde llega el mail (A vos mismo)
+        $mail->addAddress(SMTP_USER); 
+        
+        // Responder a... (Para que al dar "Responder" le escribas al cliente)
+        $mail->addReplyTo($email, $nombre);
+
+        // Contenido del Mail
+        $mail->isHTML(true);
+        $mail->Subject = "Nueva Consulta Web de: $nombre";
+        
+        $cuerpoHTML = "<h2>Nueva Consulta desde la Web</h2>";
+        $cuerpoHTML .= "<p><strong>Nombre:</strong> $nombre</p>";
+        $cuerpoHTML .= "<p><strong>Email:</strong> $email</p>";
+        $cuerpoHTML .= "<p><strong>Teléfono:</strong> $telefono</p>";
+        $cuerpoHTML .= "<hr>";
+        $cuerpoHTML .= "<p><strong>Mensaje:</strong><br>" . nl2br($mensaje) . "</p>";
+        $cuerpoHTML .= "<br><small>Enviado el " . date('d/m/Y H:i') . "</small>";
+        
+        $mail->Body = $cuerpoHTML;
+        $mail->AltBody = "Nombre: $nombre\nEmail: $email\nTelefono: $telefono\nMensaje: $mensaje";
+
+        $mail->send();
+        
+        // --- ÉXITO ---
+        echo "<script>alert('¡Gracias! Tu mensaje ha sido enviado correctamente.'); window.location.href='index.html';</script>";
+
+    } catch (Exception $e) {
+        // --- ERROR ---
+        // Mostramos el error técnico para que sepas qué pasó si falla
+        $errorMsg = addslashes($mail->ErrorInfo);
+        echo "<script>alert('Hubo un error al enviar el mensaje. Detalle: $errorMsg'); window.history.back();</script>";
+    }
+
 } else {
-    // Si no envió el token del captcha
-    echo "<script>alert('Por favor completa la verificación de seguridad.'); window.location.href='contacto.html';</script>";
+    // Si intentan entrar directo al archivo sin enviar formulario
+    header("Location: index.html");
     exit;
-}
-
-// --- SI LLEGAMOS ACÁ, ES UN HUMANO VALIDADO ---
-
-// 4. Limpieza de datos (Sanitización)
-function clean_input($data) {
-    return htmlspecialchars(stripslashes(trim($data)));
-}
-
-$nombre = clean_input($_POST['Nombre']);
-$telefono = clean_input($_POST['Telefono']);
-$email = clean_input($_POST['Email']);
-$mensaje = clean_input($_POST['Mensaje']);
-
-// Validación básica de campos vacíos
-if (empty($nombre) || empty($email) || empty($mensaje) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-    echo "<script>alert('Datos incompletos o incorrectos.'); window.location.href='contacto.html';</script>";
-    exit;
-}
-
-// 5. Envío del Correo
-$destinatario = "Consultas@nsberazategui.com.ar";
-$asunto = "Nueva Consulta Web de: $nombre";
-
-$cuerpo = "Nueva consulta verificada (Sin Spam).\n\n";
-$cuerpo .= "Nombre: $nombre\n";
-$cuerpo .= "Email: $email\n";
-$cuerpo .= "Teléfono: $telefono\n\n";
-$cuerpo .= "Mensaje:\n$mensaje\n";
-$cuerpo .= "\n--------------------------------------\n";
-$cuerpo .= "Enviado el " . date('d/m/Y H:i');
-
-$headers = "From: Web Sanatorio <no-reply@nsberazategui.com.ar>\r\n";
-$headers .= "Reply-To: $email\r\n";
-$headers .= "X-Mailer: PHP/" . phpversion();
-
-if (mail($destinatario, $asunto, $cuerpo, $headers)) {
-    // Éxito: Usamos JS para mostrar alerta y redirigir
-    echo "<script>alert('¡Mensaje enviado con éxito! Nos pondremos en contacto pronto.'); window.location.href='index.html';</script>";
-} else {
-    // Error del servidor
-    echo "<script>alert('Hubo un error al enviar el mensaje. Por favor intente más tarde.'); window.location.href='contacto.html';</script>";
 }
 ?>
